@@ -6,22 +6,23 @@ import json
 import time
 from time import gmtime, strftime
 import importlib.util
-
+import sys
 import torch
 from torch import optim
 import torch.distributed as dist
 import torch.backends.cudnn as cudnn
 from torch.cuda.amp import GradScaler
 
+sys.path.append("/home/ubuntu/GITHUG/Chinese-CLIP")
 from cn_clip.clip import load
-from cn_clip.clip.model import convert_weights, convert_state_dict, resize_pos_embed, CLIP
+
 from cn_clip.training.train import train, evaluate
 from cn_clip.training.data import get_data
 from cn_clip.training.params import parse_args
 from cn_clip.training.logger import setup_primary_logging, setup_worker_logging
 from cn_clip.training.scheduler import cosine_lr
-
-
+sys.path.append("/home/ubuntu/GITHUG/Chinese-CLIP")
+from cn_clip.clip.model import convert_weights, convert_state_dict, resize_pos_embed, CLIP
 # Used by https://github.com/openai/CLIP/issues/83 but not below.
 # Keeping it incase needed.
 def convert_models_to_fp32(model):
@@ -46,7 +47,7 @@ def torch_version_str_compare_lessequal(version1, version2):
 
 def main():
     args = parse_args()
-
+    os.environ['LOCAL_RANK']
     # Set distributed group
     args.local_device_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(args.local_device_rank)
