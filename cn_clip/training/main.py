@@ -21,7 +21,6 @@ from cn_clip.training.data import get_data
 from cn_clip.training.params import parse_args
 from cn_clip.training.logger import setup_primary_logging, setup_worker_logging
 from cn_clip.training.scheduler import cosine_lr
-sys.path.append("/home/ubuntu/GITHUG/Chinese-CLIP")
 from cn_clip.clip.model import convert_weights, convert_state_dict, resize_pos_embed, CLIP
 # Used by https://github.com/openai/CLIP/issues/83 but not below.
 # Keeping it incase needed.
