@@ -1,6 +1,8 @@
 import gradio as gr
 import sys
 import torch
+import faiss
+import numpy as np
 sys.path.append("/home/ubuntu/GITHUG/Chinese-CLIP")
 import cn_clip.clip as clip
 from cn_clip.clip import load_from_name, available_models
@@ -21,6 +23,23 @@ def base64_to_image(base64_string):
     image = Image.open(io.BytesIO(image_data))
     return image
 
+def get_index_from_db(database_file):
+    with sqlite3.connect(database_file) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT imageFeatures FROM images")
+        rows = cursor.fetchall()
+        features=[]
+        for row in rows:
+            tensor_bytes = row[0]  # 假设特征存储在行的第一列
+            feature_tensor = torch.load(io.BytesIO(tensor_bytes))
+            feature_np = feature_tensor.cpu().detach().numpy()  # 先移动到CPU，再转换为NumPy数组
+            features.append(feature_np)
+        feature_vectors=np.vstack(features)
+        dimension = feature_vectors.shape[1]  # 特征向量的维度
+        index = faiss.IndexFlatIP(dimension)  # 使用内积距离创建索引
+        feature_vectors = feature_vectors.astype('float32')
+        index.add(feature_vectors)  # 将特征向量添加到索引中
+        return index
 
 
 class clip_model:
@@ -65,13 +84,30 @@ if not os.path.exists(database_file):
                        imageFeatures BLOB)''')
     conn.commit()
     conn.close()
-
     print("数据库和数据表创建成功。")
 else:
     print("数据库已经存在，跳过创建。")
 
+faiss_index = get_index_from_db(database_file)
+print(f"从{database_file}建立faiss索引，共{faiss_index.ntotal}个特征")
 
-
+def get_search_result(faiss_index, query_vector,k):
+    distances, indices = faiss_index.search(query_vector, k)
+    # distances, indices = search_faiss_index(index, search_feature_np, 5)
+    import base64
+    with sqlite3.connect(database_file) as conn:
+        images=[]
+        cursor = conn.cursor()
+        for inde in indices[0]:
+            cursor.execute(f"SELECT imageBase64 FROM images WHERE id={inde}")
+            row = cursor.fetchone()
+            image_base64 = row[0]
+            image_data = base64.b64decode(image_base64)
+            image = Image.open(io.BytesIO(image_data))
+            # image.show()
+            images.append(image)
+        return images
+    
 
 
 # Function to process uploaded images
@@ -79,7 +115,6 @@ def process_images(images):
     try:
         conn = sqlite3.connect(database_file)
         cursor = conn.cursor()
-        
         if images is None or len(images) == 0:
             return "请选择图片"
         
@@ -94,7 +129,6 @@ def process_images(images):
                                    (base64_img, sqlite3.Binary(tensor_bytes.getvalue())))
             except (IOError, OSError) as e:
                 return f"Error processing image: {e}"
-        
         conn.commit()
         return "success"
     except Exception as e:
@@ -103,68 +137,20 @@ def process_images(images):
         if conn:
             conn.close()
 
-def calculate_similarity(search_feature, db_feature):
-    # 计算余弦相似度
-    similarity = torch.dot(search_feature, db_feature) / (torch.norm(search_feature) * torch.norm(db_feature))
-    return similarity.item()  # 返回相似度值
 
-
-# Function to call the API for retrieving similar images
-def retrieve_images(image, num):
-    search_feature = model.processimg(Image.fromarray(image)).squeeze()
-    
-    with sqlite3.connect(database_file) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT imageBase64, imageFeatures FROM images")
-        rows = cursor.fetchall()
-        
-        similarities = []
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = []
-            for row in rows:
-                base64_img = row[0]
-                tensor_bytes = row[1]
-                db_feature = torch.load(io.BytesIO(tensor_bytes)).squeeze()
-                futures.append(executor.submit(calculate_similarity, search_feature, db_feature))
-                
-            for future, row in zip(concurrent.futures.as_completed(futures), rows):
-                similarity = future.result()
-                similarities.append((similarity, row[0]))
-                
-    similarities.sort(reverse=True)
-    result = similarities[:num]
-    images = [base64_to_image(re[1]) for re in result]
+def retrieve_images_optimized(image, num):
+    search_feature = model.processimg(Image.fromarray(image)).squeeze().detach().cpu().numpy()
+    # print(search_feature)
+    # 转换搜索特征为合适的形状（假设search_feature是一个一维数组）
+    search_feature_np = search_feature.astype("float32").reshape(1, 512)
+    # print(search_feature_np.shape)
+    images=get_search_result(faiss_index,search_feature_np,num)
     return images
 
-# Function to call the API for retrieving similar text
-def retrieve_text(text,num):
-    search_feature = model.processtxt(text).squeeze()
-    conn = sqlite3.connect(database_file)
-    cursor = conn.cursor()
-    cursor.execute("SELECT imageBase64, imageFeatures FROM images")
-    rows = cursor.fetchall()
-    
-    similarities = []
-    for row in rows:
-        base64_img = row[0]
-        tensor_bytes = row[1]
-        
-        # 将二进制数据加载为张量
-        db_feature = torch.load(io.BytesIO(tensor_bytes)).squeeze()
-        
-        # 计算检索文本特征与数据库中每个文本特征之间的相似度
-        similarity = calculate_similarity(search_feature, db_feature)
-        
-        # 将相似度和文本添加到列表中
-        similarities.append((similarity, base64_img))
-    
-    similarities.sort(reverse=True)
-    result = similarities[:num]
-    images=[]
-    for re in result:
-        img=base64_to_image(re[1])
-        img=base64_to_image(re[1])
-        images.append(img)
+def retrieve_text_optimized(text,num):
+    search_feature = model.processtxt(text).squeeze().detach().cpu().numpy()
+    search_feature_np = search_feature.astype("float32").reshape(1, 512)
+    images=get_search_result(faiss_index,search_feature_np,num)
     return images
 
 
@@ -184,9 +170,9 @@ upload_images_interface = gr.Interface(
 
 # Gradio Interface for retrieving similar images
 retrieve_images_interface = gr.Interface(
-    fn=retrieve_images,
+    fn=retrieve_images_optimized,
     inputs=[gr.components.Image(),gr.Number(5)],
-    outputs=gr.components.Gallery(height=None,columns=4,preview=True),
+    outputs=gr.components.Gallery(height=None,columns=5,preview=True),
     title="图搜图",
     description="图片搜索图片",
     submit_btn="检索",
@@ -195,9 +181,9 @@ retrieve_images_interface = gr.Interface(
 
 # Gradio Interface for retrieving similar text
 retrieve_text_interface = gr.Interface(
-    fn=retrieve_text,
+    fn=retrieve_text_optimized,
     inputs=[gr.components.Textbox(lines=1, placeholder="Enter text here..."),gr.Number(5)],
-    outputs=gr.components.Gallery(),
+    outputs=gr.components.Gallery(height=None,columns=5,preview=True),
     title="文搜图",
     description="文本搜索图片",
     submit_btn="检索",
@@ -208,7 +194,7 @@ retrieve_text_interface = gr.Interface(
 # Launch the Gradio interfaces
 
 with gr.TabbedInterface(
-        [upload_images_interface, retrieve_images_interface, retrieve_text_interface],
-        ["上传图片", "图搜图", "文搜图"]
+        [ retrieve_text_interface,retrieve_images_interface,upload_images_interface, ],
+        [ "文搜图","图搜图", "上传图片"]
     ) as demo:
         demo.launch()  # 启动标签页式界面

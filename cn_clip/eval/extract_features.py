@@ -197,6 +197,7 @@ if __name__ == "__main__":
                     image_ids, images = batch
                     images = images.cuda(args.gpu, non_blocking=True)
                     image_features = model(images, None)
+                    
                     image_features /= image_features.norm(dim=-1, keepdim=True)
                     for image_id, image_feature in zip(image_ids.tolist(), image_features.tolist()):
                         fout.write("{}\n".format(json.dumps({"image_id": image_id, "feature": image_feature})))

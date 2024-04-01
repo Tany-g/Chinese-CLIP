@@ -1,90 +1,51 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-import sqlite3
-import numpy as np
-import torch 
+from torch.utils.data import Dataset,DataLoader
+from torchvision.transforms import Compose,Normalize,Resize,ToTensor,InterpolationMode,
 from PIL import Image
-
-import cn_clip.clip as clip
-from cn_clip.clip import load_from_name, available_models
-print("Available models:", available_models())  
-# Available models: ['ViT-B-16', 'ViT-L-14', 'ViT-L-14-336', 'ViT-H-14', 'RN50']
-from PIL import Image
-import base64
-import io
-def image_to_base64(image_path):
-    with open(image_path, "rb") as img_file:
-        encoded_string = base64.b64encode(img_file.read())
-    return encoded_string.decode('utf-8')
-
-def base64_to_image(base64_string):
-    image_data = base64.b64decode(base64_string)
-    image = Image.open(io.BytesIO(image_data))
-    return image
+from io import BytesIO
+import os,lmdb,base64
 
 
 
-class clip_model:
-    def __init__(self) -> None:
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model, self.preprocess = load_from_name("ViT-B-16", device=self.device, download_root='./')
-        self.model.eval()
-
-    def processimg(self,image:"str"):
-        image = self.preprocess(Image.open("examples/pokemon.jpeg")).unsqueeze(0).to(self.device)
-        image_features = self.model.encode_image(image)
-        image_features /= image_features.norm(dim=-1, keepdim=True) 
-        return image_features
-    
-    
-    def processtxt(self,txt):
-        text = clip.tokenize([txt]).to(self.device)
-        text_features = self.model.encode_text(text)
-        text_features /= text_features.norm(dim=-1, keepdim=True)  
-        return text_features
+def _convert_to_rgb(image):
+    return image.convert('RGB')
 
 
-app = FastAPI()
-model = clip_model()
-# Connect to the SQLite database
+class EvalImgDataset(Dataset):
+    def __init__(self, lmdb_imgs, resolution=224):
+        assert os.path.isdir(lmdb_imgs), "The image LMDB directory {} not exists!".format(lmdb_imgs)
 
-conn = sqlite3.connect('database.db')
-cursor = conn.cursor()
+        self.env_imgs = lmdb.open(lmdb_imgs, readonly=True, create=False, lock=False, readahead=False, meminit=False)
+        self.txn_imgs = self.env_imgs.begin(buffers=True)
+        self.cursor_imgs = self.txn_imgs.cursor()
 
+        self.iter_imgs = iter(self.cursor_imgs)
+        self.number_images = int(self.txn_imgs.get(key=b'num_images').tobytes().decode('utf-8'))
 
-# Define data model for request body
-class ImageUploadData(BaseModel):
-    image_base64: str
+        self.transform = self._build_transform(resolution)
 
-class ImageSearchData(BaseModel):
-    image_base64: str
-    num_results: int
+    def _build_transform(self, resolution):
+        normalize = Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
+        return Compose([
+                Resize((resolution, resolution), interpolation=InterpolationMode.BICUBIC),
+                _convert_to_rgb,
+                ToTensor(),
+                normalize,
+            ])
 
-class TextSearchData(BaseModel):
-    text: str
-    num_results: int
+    def __len__(self):
+        return self.number_images
 
-# API 1: Image Upload and Clip Feature Extraction
-@app.post("/upload")
-def upload_image(image_data: ImageUploadData):
-    # Your code for image upload and Clip feature extraction goes here
-    # Placeholder for demonstration purposes
-    return {"message": "Image uploaded and Clip features extracted successfully."}
+    def __getitem__(self, idx):
+        img_id, image_b64 = next(self.iter_imgs)
+        if img_id == b"num_images":
+            img_id, image_b64 = next(self.iter_imgs)
 
-# API 2: Image Retrieval
-@app.post("/retrieve_images")
-def retrieve_images(image_search_data: ImageSearchData):
-    # Your code for image retrieval using KNN goes here
-    # Placeholder for demonstration purposes
-    return {"message": f"{image_search_data.num_results} similar images retrieved successfully."}
+        img_id = img_id.tobytes()
+        image_b64 = image_b64.tobytes()
 
-# API 3: Text Retrieval
-@app.post("/retrieve_text")
-def retrieve_text(text_search_data: TextSearchData):
-    # Tokenize and vectorize the input text
+        img_id = int(img_id.decode(encoding="utf8", errors="ignore"))
+        image_b64 = image_b64.decode(encoding="utf8", errors="ignore")
+        image = Image.open(BytesIO(base64.urlsafe_b64decode(image_b64))) # already resized
+        image = self.transform(image)
 
-    return {"similar_texts": ""}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        return img_id, image
